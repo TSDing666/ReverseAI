@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>AI 逆向助手</title>
+<style>
+  :root { --bg:#0f1220; --panel:#181c30; --msg-user:#243b6b; --msg-ai:#1c2440; --accent:#e94560; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:sans-serif; background:var(--bg); color:#e6e8f0; height:100vh; display:flex; flex-direction:column; }
+  header { padding:10px 14px; background:var(--panel); display:flex; align-items:center; gap:10px; }
+  header b { flex:1; }
+  header button { background:transparent; color:#9aa3c0; border:1px solid #333a55; border-radius:6px; padding:5px 10px; }
+  #chat { flex:1; overflow-y:auto; padding:12px; }
+  .msg { margin:8px 0; padding:10px 12px; border-radius:12px; max-width:88%; white-space:pre-wrap; word-break:break-word; font-size:14px; line-height:1.5; }
+  .user { background:var(--msg-user); margin-left:auto; }
+  .ai { background:var(--msg-ai); }
+  .tool { background:#10141f; border:1px solid #2a3352; color:#8fd0ff; font-family:monospace; font-size:12px; }
+  .confirm { background:#3d1f2a; border:1px solid var(--accent); }
+  .confirm button { margin:6px 6px 0 0; padding:8px 16px; border:none; border-radius:8px; font-weight:bold; }
+  #yes { background:var(--accent); color:#fff; }
+  #no { background:#333a55; color:#cfd4e6; }
+  #bar { display:flex; padding:8px; background:var(--panel); gap:8px; }
+  #input { flex:1; padding:10px; border:none; border-radius:8px; background:#10141f; color:#e6e8f0; font-size:15px; }
+  #send { padding:10px 20px; background:var(--accent); color:#fff; border:none; border-radius:8px; }
+  .hint { color:#66708f; font-size:12px; text-align:center; margin:4px; }
+</style>
+</head>
+<body>
+<header><b>🤖 AI 逆向助手</b><button onclick="AndroidBridge.openTerminal()">终端</button></header>
+<div id="chat"><div class="hint">Agent 端点: <span id="ep">...</span> · 高危操作需手动确认</div></div>
+<div id="bar">
+  <input id="input" type="text" placeholder="例如: 解包 /sdcard/app.apk 并分析登录逻辑" />
+  <button id="send">发送</button>
+</div>
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const EP = AndroidBridge.getAgentUrl();
+document.getElementById('ep').textContent = EP;
+let history = [];          // Agent 返回的完整 history (含工具消息)
+let busy = false;
+
+function add(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+
+// 同步 post 会阻塞 JS, 用 Worker 转异步
+const workerCode = `
+self.onmessage = e => {
+  const {url, body, id} = e.data;
+  const x = new XMLHttpRequest();
+  x.open('POST', url, false);   // Worker 内允许同步
+  x.setRequestHeader('Content-Type','application/json');
+  try { x.send(body); self.postMessage({id, status:x.status, text:x.responseText}); }
+  catch(err) { self.postMessage({id, status:0, text:''+err}); }
+};`;
+const worker = new Worker(URL.createObjectURL(new Blob([workerCode], {type:'text/javascript'})));
+
+function send(text, confirm) {
+  if (busy) return;
+  busy = true; input.value=''; document.getElementById('send').disabled = true;
+  if (!confirm) add('user', text);
+  const aiMsg = add('ai', '…');
+  const body = JSON.stringify({message: text, history: history, confirm: !!confirm});
+  worker.postMessage({url: EP + '/chat', body: body, id: Date.now()});
+  worker.onmessage = ev => {
+    busy = false; document.getElementById('send').disabled = false;
+    let r;
+    try {
+      const resp = JSON.parse(ev.data.text);
+      r = JSON.parse(resp.body);
+    } catch (err) { aiMsg.textContent = '请求失败: ' + ev.data.text; return; }
+    if (r.confirm_required) {
+      aiMsg.className = 'msg confirm';
+      aiMsg.textContent = '⚠ 高危操作需要确认\n工具: ' + r.confirm_required.tool +
+                          '\n参数: ' + JSON.stringify(r.confirm_required.arguments, null, 2);
+      const y = document.createElement('button'); y.id='yes'; y.textContent='确认执行';
+      const n = document.createElement('button'); n.id='no'; n.textContent='取消';
+      y.onclick = () => { aiMsg.remove(); send(text, true); };
+      n.onclick = () => { aiMsg.textContent='已取消。'; };
+      aiMsg.appendChild(document.createElement('br')); aiMsg.appendChild(y); aiMsg.appendChild(n);
+    } else {
+      aiMsg.textContent = r.reply || '(空回复)';
+      if (r.history) history = r.history;
+    }
+    chat.scrollTop = chat.scrollHeight;
+  };
+}
+
+document.getElementById('send').onclick = () => { const t=input.value.trim(); if(t) send(t); };
+input.addEventListener('keypress', e => { if (e.key==='Enter') { const t=input.value.trim(); if(t) send(t); } });
+</script>
+</body>
+</html>
